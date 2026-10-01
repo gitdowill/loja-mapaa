@@ -815,3 +815,413 @@ def test_contexto_acumulado_filtra_gatilho_ja_apresentado():
         "HO-20987",
         "HO-21251",
     ]
+
+import pytest
+
+from app.recommendations import registrar_resposta_recomendacao
+
+
+@pytest.mark.parametrize("resposta", ["aceita", "recusada", "ignorada"])
+def test_resposta_comercial_nao_altera_evidencia_historica(resposta):
+    """
+    Uma resposta comercial pertence ao contexto do atendimento.
+
+    Ela não pode alterar a evidência histórica registrada em
+    produto_relacoes.
+    """
+    _limpar_estado_recomendacoes()
+
+    with conectar() as conexao:
+        pedido_id = conexao.execute(
+            """
+            INSERT INTO pedidos DEFAULT VALUES
+            """
+        ).lastrowid
+
+        conexao.execute(
+            """
+            INSERT INTO pedido_itens (
+                pedido_id,
+                codigo_informado,
+                encontrado
+            )
+            VALUES (?, ?, 1)
+            """,
+            (pedido_id, "HO-20987"),
+        )
+
+        conexao.execute(
+            """
+            INSERT INTO produto_relacoes (
+                produto_id,
+                produto_relacionado_id,
+                tipo_relacao,
+                forca,
+                ocorrencias
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (25, 104, "comprados_juntos", 0.90, 10),
+        )
+
+        conexao.commit()
+
+        antes = conexao.execute(
+            """
+            SELECT
+                produto_id,
+                produto_relacionado_id,
+                tipo_relacao,
+                forca,
+                ocorrencias
+            FROM produto_relacoes
+            WHERE produto_id = ?
+              AND produto_relacionado_id = ?
+            """,
+            (25, 104),
+        ).fetchone()
+
+    registrar_resposta_recomendacao(
+        pedido_id=pedido_id,
+        produto_id=104,
+        resposta=resposta,
+    )
+
+    with conectar() as conexao:
+        depois = conexao.execute(
+            """
+            SELECT
+                produto_id,
+                produto_relacionado_id,
+                tipo_relacao,
+                forca,
+                ocorrencias
+            FROM produto_relacoes
+            WHERE produto_id = ?
+              AND produto_relacionado_id = ?
+            """,
+            (25, 104),
+        ).fetchone()
+
+        quantidade_relacoes = conexao.execute(
+            """
+            SELECT COUNT(*)
+            FROM produto_relacoes
+            WHERE produto_id = ?
+              AND produto_relacionado_id = ?
+            """,
+            (25, 104),
+        ).fetchone()[0]
+
+    assert dict(depois) == dict(antes)
+    assert quantidade_relacoes == 1
+    assert depois["forca"] == 0.90
+    assert depois["ocorrencias"] == 10
+
+
+@pytest.mark.parametrize("resposta", ["aceita", "recusada", "ignorada"])
+def test_resposta_comercial_e_registrada_no_contexto_do_atendimento(resposta):
+    _limpar_estado_recomendacoes()
+
+    with conectar() as conexao:
+        pedido_id = conexao.execute(
+            """
+            INSERT INTO pedidos DEFAULT VALUES
+            """
+        ).lastrowid
+
+        conexao.commit()
+
+    registrar_resposta_recomendacao(
+        pedido_id=pedido_id,
+        produto_id=104,
+        resposta=resposta,
+    )
+
+    with conectar() as conexao:
+        evento = conexao.execute(
+            """
+            SELECT
+                pedido_id,
+                tipo,
+                produto_id,
+                dados_json
+            FROM eventos_atendimento
+            WHERE pedido_id = ?
+              AND tipo = 'resposta_recomendacao'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (pedido_id,),
+        ).fetchone()
+
+    assert evento is not None
+    assert evento["pedido_id"] == pedido_id
+    assert evento["tipo"] == "resposta_recomendacao"
+    assert evento["produto_id"] == 104
+
+    import json
+
+    dados = json.loads(evento["dados_json"])
+    assert dados["resposta"] == resposta
+
+
+def test_resposta_comercial_nao_duplica_evidencia_historica():
+    _limpar_estado_recomendacoes()
+
+    with conectar() as conexao:
+        pedido_id = conexao.execute(
+            """
+            INSERT INTO pedidos DEFAULT VALUES
+            """
+        ).lastrowid
+
+        conexao.execute(
+            """
+            INSERT INTO produto_relacoes (
+                produto_id,
+                produto_relacionado_id,
+                tipo_relacao,
+                forca,
+                ocorrencias
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (25, 104, "comprados_juntos", 0.90, 10),
+        )
+
+        conexao.commit()
+
+    registrar_resposta_recomendacao(
+        pedido_id=pedido_id,
+        produto_id=104,
+        resposta="aceita",
+    )
+
+    registrar_resposta_recomendacao(
+        pedido_id=pedido_id,
+        produto_id=104,
+        resposta="aceita",
+    )
+
+    with conectar() as conexao:
+        relacao = conexao.execute(
+            """
+            SELECT forca, ocorrencias
+            FROM produto_relacoes
+            WHERE produto_id = ?
+              AND produto_relacionado_id = ?
+            """,
+            (25, 104),
+        ).fetchone()
+
+        eventos = conexao.execute(
+            """
+            SELECT COUNT(*)
+            FROM eventos_atendimento
+            WHERE pedido_id = ?
+              AND tipo = 'resposta_recomendacao'
+              AND produto_id = ?
+            """,
+            (pedido_id, 104),
+        ).fetchone()[0]
+
+    # A evidência histórica continua exatamente igual.
+    assert relacao["forca"] == 0.90
+    assert relacao["ocorrencias"] == 10
+
+    # Cada resposta registrada continua sendo um evento de atendimento.
+    assert eventos == 2
+
+
+def test_recomendacao_nao_registra_resposta_comercial_automaticamente():
+    _limpar_estado_recomendacoes()
+
+    with conectar() as conexao:
+        pedido_id = conexao.execute(
+            """
+            INSERT INTO pedidos DEFAULT VALUES
+            """
+        ).lastrowid
+
+        conexao.execute(
+            """
+            INSERT INTO pedido_itens (
+                pedido_id,
+                codigo_informado,
+                encontrado
+            )
+            VALUES (?, ?, 1)
+            """,
+            (pedido_id, "HO-20987"),
+        )
+
+        conexao.execute(
+            """
+            INSERT INTO produto_relacoes (
+                produto_id,
+                produto_relacionado_id,
+                tipo_relacao,
+                forca,
+                ocorrencias
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (25, 104, "comprados_juntos", 0.90, 10),
+        )
+
+        conexao.commit()
+
+    resultados = recomendar_para_codigo(
+        "HO-20987",
+        pedido_id=pedido_id,
+    )
+
+    assert len(resultados) == 1
+    assert resultados[0]["produto_id"] == 104
+
+    with conectar() as conexao:
+        eventos = conexao.execute(
+            """
+            SELECT COUNT(*)
+            FROM eventos_atendimento
+            WHERE pedido_id = ?
+              AND tipo = 'resposta_recomendacao'
+              AND produto_id = ?
+            """,
+            (pedido_id, 104),
+        ).fetchone()[0]
+
+    # Gerar a sugestão não equivale a uma decisão comercial.
+    assert eventos == 0
+
+def test_resposta_comercial_de_um_atendimento_nao_contamina_outro():
+    _limpar_estado_recomendacoes()
+
+    with conectar() as conexao:
+        pedido_a = conexao.execute(
+            """
+            INSERT INTO pedidos DEFAULT VALUES
+            """
+        ).lastrowid
+
+        pedido_b = conexao.execute(
+            """
+            INSERT INTO pedidos DEFAULT VALUES
+            """
+        ).lastrowid
+
+        conexao.execute(
+            """
+            INSERT INTO pedido_itens (
+                pedido_id,
+                codigo_informado,
+                encontrado
+            )
+            VALUES (?, ?, 1)
+            """,
+            (pedido_a, "HO-20987"),
+        )
+
+        conexao.execute(
+            """
+            INSERT INTO pedido_itens (
+                pedido_id,
+                codigo_informado,
+                encontrado
+            )
+            VALUES (?, ?, 1)
+            """,
+            (pedido_b, "HO-20987"),
+        )
+
+        conexao.execute(
+            """
+            INSERT INTO produto_relacoes (
+                produto_id,
+                produto_relacionado_id,
+                tipo_relacao,
+                forca,
+                ocorrencias
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (25, 104, "comprados_juntos", 0.90, 10),
+        )
+
+        conexao.commit()
+
+    # Atendimento A recebe a recomendação e o cliente recusa.
+    resultados_a = recomendar_para_codigo(
+        "HO-20987",
+        pedido_id=pedido_a,
+    )
+
+    assert len(resultados_a) == 1
+    assert resultados_a[0]["produto_id"] == 104
+
+    registrar_resposta_recomendacao(
+        pedido_id=pedido_a,
+        produto_id=104,
+        resposta="recusada",
+    )
+
+    # A decisão do atendimento A não deve alterar a evidência.
+    with conectar() as conexao:
+        relacao = conexao.execute(
+            """
+            SELECT
+                produto_id,
+                produto_relacionado_id,
+                tipo_relacao,
+                forca,
+                ocorrencias
+            FROM produto_relacoes
+            WHERE produto_id = ?
+              AND produto_relacionado_id = ?
+            """,
+            (25, 104),
+        ).fetchone()
+
+    assert relacao["produto_id"] == 25
+    assert relacao["produto_relacionado_id"] == 104
+    assert relacao["tipo_relacao"] == "comprados_juntos"
+    assert relacao["forca"] == 0.90
+    assert relacao["ocorrencias"] == 10
+
+    # Atendimento B começa independente do atendimento A.
+    resultados_b = recomendar_para_codigo(
+        "HO-20987",
+        pedido_id=pedido_b,
+    )
+
+    assert len(resultados_b) == 1
+    assert resultados_b[0]["produto_id"] == 104
+    assert resultados_b[0]["tipo_relacao"] == "comprados_juntos"
+
+    # A recusa pertence somente ao atendimento A.
+    with conectar() as conexao:
+        respostas_a = conexao.execute(
+            """
+            SELECT COUNT(*)
+            FROM eventos_atendimento
+            WHERE pedido_id = ?
+              AND tipo = 'resposta_recomendacao'
+              AND produto_id = ?
+            """,
+            (pedido_a, 104),
+        ).fetchone()[0]
+
+        respostas_b = conexao.execute(
+            """
+            SELECT COUNT(*)
+            FROM eventos_atendimento
+            WHERE pedido_id = ?
+              AND tipo = 'resposta_recomendacao'
+              AND produto_id = ?
+            """,
+            (pedido_b, 104),
+        ).fetchone()[0]
+
+    assert respostas_a == 1
+    assert respostas_b == 0

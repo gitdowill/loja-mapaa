@@ -300,3 +300,48 @@ def recomendar_para_codigo(
         )
 
         return recomendacoes[:limite]
+
+
+def registrar_resposta_recomendacao(
+    pedido_id: int,
+    produto_id: int,
+    resposta: str,
+):
+    """
+    Registra a resposta comercial a uma recomendação.
+
+    Este evento pertence ao contexto do atendimento e não altera
+    a evidência histórica armazenada em produto_relacoes.
+    """
+    respostas_validas = {"aceita", "recusada", "ignorada"}
+
+    if resposta not in respostas_validas:
+        raise ValueError(
+            f"Resposta inválida: {resposta!r}. "
+            f"Use: {', '.join(sorted(respostas_validas))}."
+        )
+
+    import json
+
+    with conectar() as conexao:
+        conexao.execute(
+            """
+            INSERT INTO eventos_atendimento (
+                pedido_id,
+                tipo,
+                produto_id,
+                dados_json
+            )
+            VALUES (?, 'resposta_recomendacao', ?, ?)
+            """,
+            (
+                pedido_id,
+                produto_id,
+                json.dumps(
+                    {"resposta": resposta},
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+
+        conexao.commit()
