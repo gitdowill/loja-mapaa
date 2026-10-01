@@ -1225,3 +1225,198 @@ def test_resposta_comercial_de_um_atendimento_nao_contamina_outro():
 
     assert respostas_a == 1
     assert respostas_b == 0
+
+def test_gatilhos_concorrentes_mantem_evidencias_independentes():
+    _limpar_estado_recomendacoes()
+
+    with conectar() as conexao:
+        pedido_id = conexao.execute(
+            """
+            INSERT INTO pedidos DEFAULT VALUES
+            """
+        ).lastrowid
+
+        conexao.execute(
+            """
+            INSERT INTO pedido_itens (
+                pedido_id,
+                codigo_informado,
+                encontrado
+            )
+            VALUES (?, ?, 1)
+            """,
+            (pedido_id, "HA-21575"),
+        )
+
+        conexao.execute(
+            """
+            INSERT INTO produto_relacoes (
+                produto_id,
+                produto_relacionado_id,
+                tipo_relacao,
+                forca,
+                ocorrencias
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (1, 104, "comprados_juntos", 0.90, 10),
+        )
+
+        conexao.execute(
+            """
+            INSERT INTO produto_relacoes (
+                produto_id,
+                produto_relacionado_id,
+                tipo_relacao,
+                forca,
+                ocorrencias
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (1, 2, "alternativa", 0.70, 8),
+        )
+
+        conexao.commit()
+
+    resultados = recomendar_para_codigo(
+        "HA-21575",
+        pedido_id=pedido_id,
+    )
+
+    assert len(resultados) == 2
+
+    por_produto = {
+        resultado["produto_id"]: resultado
+        for resultado in resultados
+    }
+
+    assert por_produto[104]["tipo_relacao"] == "comprados_juntos"
+    assert por_produto[104]["forca"] == 0.90
+    assert por_produto[104]["ocorrencias"] == 10
+
+    assert por_produto[2]["tipo_relacao"] == "alternativa"
+    assert por_produto[2]["forca"] == 0.70
+    assert por_produto[2]["ocorrencias"] == 8
+
+    with conectar() as conexao:
+        eventos = conexao.execute(
+            """
+            SELECT COUNT(*)
+            FROM eventos_atendimento
+            WHERE pedido_id = ?
+              AND tipo = 'resposta_recomendacao'
+            """,
+            (pedido_id,),
+        ).fetchone()[0]
+
+    assert eventos == 0
+
+
+def test_resposta_de_um_gatilho_nao_altera_gatilho_concorrente():
+    _limpar_estado_recomendacoes()
+
+    with conectar() as conexao:
+        pedido_id = conexao.execute(
+            """
+            INSERT INTO pedidos DEFAULT VALUES
+            """
+        ).lastrowid
+
+        conexao.execute(
+            """
+            INSERT INTO pedido_itens (
+                pedido_id,
+                codigo_informado,
+                encontrado
+            )
+            VALUES (?, ?, 1)
+            """,
+            (pedido_id, "HA-21575"),
+        )
+
+        conexao.execute(
+            """
+            INSERT INTO produto_relacoes (
+                produto_id,
+                produto_relacionado_id,
+                tipo_relacao,
+                forca,
+                ocorrencias
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (1, 104, "comprados_juntos", 0.90, 10),
+        )
+
+        conexao.execute(
+            """
+            INSERT INTO produto_relacoes (
+                produto_id,
+                produto_relacionado_id,
+                tipo_relacao,
+                forca,
+                ocorrencias
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (1, 2, "alternativa", 0.70, 8),
+        )
+
+        conexao.commit()
+
+    resultados = recomendar_para_codigo(
+        "HA-21575",
+        pedido_id=pedido_id,
+    )
+
+    assert len(resultados) == 2
+
+    registrar_resposta_recomendacao(
+        pedido_id=pedido_id,
+        produto_id=104,
+        resposta="recusada",
+    )
+
+    with conectar() as conexao:
+        relacoes = conexao.execute(
+            """
+            SELECT
+                produto_relacionado_id,
+                tipo_relacao,
+                forca,
+                ocorrencias
+            FROM produto_relacoes
+            WHERE produto_id = ?
+            ORDER BY produto_relacionado_id
+            """,
+            (1,),
+        ).fetchall()
+
+    assert len(relacoes) == 2
+
+    por_produto = {
+        relacao["produto_relacionado_id"]: relacao
+        for relacao in relacoes
+    }
+
+    assert por_produto[104]["tipo_relacao"] == "comprados_juntos"
+    assert por_produto[104]["forca"] == 0.90
+    assert por_produto[104]["ocorrencias"] == 10
+
+    assert por_produto[2]["tipo_relacao"] == "alternativa"
+    assert por_produto[2]["forca"] == 0.70
+    assert por_produto[2]["ocorrencias"] == 8
+
+    with conectar() as conexao:
+        respostas = conexao.execute(
+            """
+            SELECT produto_id, dados_json
+            FROM eventos_atendimento
+            WHERE pedido_id = ?
+              AND tipo = 'resposta_recomendacao'
+            """,
+            (pedido_id,),
+        ).fetchall()
+
+    assert len(respostas) == 1
+    assert respostas[0]["produto_id"] == 104
