@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 import sqlite3
 
 
@@ -7,12 +8,32 @@ DATA_DIR = BASE_DIR / "data"
 DB_PATH = DATA_DIR / "loja.db"
 
 
+def obter_db_path() -> Path:
+    """
+    Retorna o banco configurado.
+
+    Normalmente usa data/loja.db.
+    Testes podem definir LOJA_DB_PATH para usar uma
+    cópia isolada sem alterar o banco real.
+    """
+    caminho = os.environ.get("LOJA_DB_PATH")
+
+    if caminho:
+        return Path(caminho).expanduser().resolve()
+
+    return DB_PATH
+
+
 def conectar():
     """Abre uma conexão com o banco local."""
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    caminho = obter_db_path()
 
-    conexao = sqlite3.connect(DB_PATH)
+    caminho.parent.mkdir(parents=True, exist_ok=True)
+
+    conexao = sqlite3.connect(caminho)
     conexao.row_factory = sqlite3.Row
+
+    conexao.execute("PRAGMA foreign_keys = ON")
 
     return conexao
 
